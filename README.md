@@ -194,15 +194,17 @@ Cygwin's Libc++ can be buggy, if you can't link with Libc++, see [this part](#he
 
 Please read the [Cross compiling](#cross-compiling) instructions first.
 
-Install the [Emscripten][Emscripten] SDK and also a **stable** Rust compiler (XXX: nightly too unstable for wasm).
+> **Note**
+>
+> Currently Emscripten port is only tested to build correctly under archlinux.
 
-Use [vcpkg][vcpkg] to install the [depended libraries](#requirements), the triplet is called `wasm32-emscripten`.
+Install the [Emscripten][Emscripten] SDK and also a nightly Rust compiler using [rustup][rustup].
 
-When configuring, use `emcmake cmake` instead of `cmake` (but don't use it for `cmake --build` and other CMake commands) , and use `/path/to/your/emsdk/emscripten/cmake/Modules/Platform/Emscripten.cmake` as the toolchain file for vcpkg.
+Use [vcpkg][vcpkg] <sup>*AUR*</sup> to install the [depended libraries](#requirements), the triplet is called `wasm32-emscripten`.
+
+When configuring, use `emcmake cmake` instead of `cmake` (but don't use it for `cmake --build` and other CMake commands) , and use `/usr/lib/emscripten/cmake/Modules/Platform/Emscripten.cmake` as the toolchain file for vcpkg.
 
 Build Rust standard library from source to make sure things works as expected. (FIXME: why is this needed?)
-
-Pass `-DRUSTC_BOOTSTRAP=1` to CMake since we are using a stable Rust toolchain.
 
 For NodeJS, make sure to set `CMAKE_EXE_LINKER_FLAGS` to `-sNODERAWFS` to allow using the host filesystem.
 

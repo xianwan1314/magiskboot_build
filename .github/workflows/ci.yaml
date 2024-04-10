@@ -818,40 +818,65 @@ jobs:
     needs: [vars]
     env:
       vcpkg_triplet: "wasm32-emscripten"
-      emsdk_ver: 3.1.56
-      emsdk_cache_dir: "emsdk-cache"
       rust_target: "wasm32-unknown-emscripten"
       upload_suffix: "emscripten-wasm32-noderawfs-static"
+
+    container:
+      image: archlinux:base-devel
+      volumes:
+        - ${{ github.workspace }}:/magiskboot_workspace
+
+      # New versions of glibc use the new clone3() syscall which has not
+      # yet been whitelisted in GitHub's secomp profile. To prevent jobs
+      # using these distros from failing (e.g. openSUSE) change the
+      # secomp policy.
+      #
+      # See https://github.com/nmeum/android-tools/pull/48#issuecomment-944893176
+      options: --security-opt seccomp=unconfined
 
     steps:
       - name: Prepare (Host)
         run: |
-          sudo apt update
-          sudo DEBIAN_FRONTEND=noninteractive apt install -y curl tar file \
-                        build-essential pkg-config cmake ninja-build nodejs
+          pacman-key --init
+          pacman -Syu --noconfirm
+
+          pacman-key --lsign-key "farseerfc@archlinux.org"
+          cat >> /etc/pacman.conf << EOF
+          [archlinuxcn]
+          Server = https://repo.archlinuxcn.org/\$arch
+          EOF
+          pacman -Sy
+          pacman -S --noconfirm --needed archlinuxcn-keyring
+
+          pacman -S --noconfirm --needed archlinuxcn-keyring yay tar wget file xxd \
+                     base-devel pkgconf clang cmake ninja rustup nodejs emscripten
+          yay -S --noconfirm --needed vcpkg
+
+          echo "CACHE = '/magiskboot_workspace/emsdk-cache'" | tee -a /usr/lib/emscripten/.emscripten
+
+          emsdk_ver="$(pacman -Q emscripten | cut -d ' ' -f 2)"
+          echo "emsdk_ver=${emsdk_ver}" | tee -a $GITHUB_ENV
 
       - name: Cache (Emscripten)
         id: cache-emsdk-system-libs
         uses: actions/cache@v4
         with:
-          path: ${{ env.emsdk_cache_dir }}
+          path: ${{ github.workspace }}/emsdk-cache
           key: emsdk-${{ env.emsdk_ver }}-${{ runner.os }}
-
-      - name: Prepare (Emscripten)
-        uses: mymindstorm/setup-emsdk@v13
-        with:
-          version: ${{ env.emsdk_ver }}
-          actions-cache-folder: ${{ env.emsdk_cache_dir }}
 
       - name: Prepare (Environment)
         run: |
-          echo "vcpkg_root=$VCPKG_INSTALLATION_ROOT" | tee -a $GITHUB_ENV
+          source /etc/profile.d/vcpkg.sh
+          echo "VCPKG_ROOT=${VCPKG_ROOT}" | tee -a $GITHUB_ENV
+          echo "VCPKG_DOWNLOADS=${VCPKG_DOWNLOADS}" | tee -a $GITHUB_ENV
+
+          echo /usr/lib/emscripten | tee -a $GITHUB_PATH
 
       - name: Cache (Cross)
         id: cache-cross-vcpkgs
         uses: actions/cache@v4
         with:
-          path: ${{ env.vcpkg_root }}/installed
+          path: ${{ env.VCPKG_ROOT }}/installed
           key: cross-vcpkgs-${{ env.vcpkg_triplet }}-emsdk-${{ env.emsdk_ver }}
 
       - name: Prepare (liblzma)
@@ -860,10 +885,10 @@ jobs:
           # SECURITY: Git tarballs are currently not affected by the vulnerability
           # TODO: remove 5.6.0 when vcpkg and github runner image updates
           # TODO: remove this workaround when the repo is back
-          mkdir -p $VCPKG_INSTALLATION_ROOT/downloads
+          mkdir -p $VCPKG_DOWNLOADS
           for xz_ver in 5.4.4 5.6.0; do
             wget https://github.com/bminor/xz/archive/refs/tags/v${xz_ver}.tar.gz \
-              -O $VCPKG_INSTALLATION_ROOT/downloads/tukaani-project-xz-v${xz_ver}.tar.gz
+              -O $VCPKG_DOWNLOADS/tukaani-project-xz-v${xz_ver}.tar.gz
           done
 
       - name: Prepare (Cross)
@@ -871,11 +896,9 @@ jobs:
           vcpkg install --host-triplet=${{ env.vcpkg_triplet }} \
                         zlib liblzma lz4 bzip2
 
-      # rust from ubuntu is quite old so use rustup
       - name: Prepare (Rust)
         run: |
-          curl https://sh.rustup.rs -sSf | sh -s -- -y
-          . "$HOME/.cargo/env"
+          rustup toolchain install nightly-x86_64-unknown-linux-gnu
           rustup component add rust-src
 
       - name: Synchronize (source)
@@ -896,14 +919,13 @@ jobs:
           cd magiskboot_*-src/
 
           echo -e "\n### configure ###\n"
-          . "$HOME/.cargo/env"
           emcmake cmake -G Ninja -B build -DCMAKE_EXE_LINKER_FLAGS=" ${{ needs.vars.outputs.lto_ldflags }} -sNODERAWFS" \
-              -DRust_CARGO_TARGET=${{ env.rust_target }} -DRUST_BUILD_STD=ON -DRUSTC_BOOTSTRAP=1 \
+              -DRust_CARGO_TARGET=${{ env.rust_target }} -DRUST_BUILD_STD=ON \
               -DFULL_RUST_LTO=${{ needs.vars.outputs.full_lto }} \
               -DCMAKE_BUILD_TYPE=${{ needs.vars.outputs.cmake_build_type }} -DPREFER_STATIC_LINKING=ON \
-              -DCMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake \
+              -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake \
               -DVCPKG_TARGET_TRIPLET=${{ env.vcpkg_triplet }} \
-              -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$(dirname $(which emcc))/cmake/Modules/Platform/Emscripten.cmake"
+              -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=/usr/lib/emscripten/cmake/Modules/Platform/Emscripten.cmake
 
           echo -e "\n### build ###\n"
           cmake --build build -j $(nproc) -v
@@ -911,8 +933,8 @@ jobs:
 
           file build/magiskboot*
           node ./build/magiskboot*.js || true
-          rm -rf $GITHUB_WORKSPACE/${{ env.progname }}-out && mkdir -p $GITHUB_WORKSPACE/${{ env.progname }}-out
-          cp -afv build/magiskboot* $GITHUB_WORKSPACE/${{ env.progname }}-out
+          rm -rf /magiskboot_workspace/${{ env.progname }}-out && mkdir -p /magiskboot_workspace/${{ env.progname }}-out
+          cp -afv build/magiskboot* /magiskboot_workspace/${{ env.progname }}-out
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -924,7 +946,7 @@ jobs:
       - name: Check
         run: |
           cd magiskboot_*-src/
-          ./scripts/magiskboot_test.sh $GITHUB_WORKSPACE/${{ env.progname }}-out/magiskboot*.js
+          ./scripts/magiskboot_test.sh /magiskboot_workspace/${{ env.progname }}-out/magiskboot*.js
 
       # Fail fast
       - name: Cancel other jobs
